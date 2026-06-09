@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Placeholder for a future submission helper.
+
+This utility has not been implemented yet. It is intentionally excluded
+from run_all.sh until the real code exists.
+"""
+
+import sys
+
+
+def main() -> int:
+    print(
+        "Submission helper is not implemented yet. "
+        "This file is a placeholder and is skipped by run_all.sh.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

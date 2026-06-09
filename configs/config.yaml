@@ -1,0 +1,54 @@
+data:
+  train_path: Train.csv
+  val_path: Val.csv
+  test_path: Test.csv
+  subsets:
+    - Eng_Uga
+    - Aka_Gha
+    - Eng_Gha
+    - Eng_Eth
+    - Lug_Uga
+    - Eng_Ken
+    - Swa_Ken
+    - Amh_Eth
+
+model:
+  default: google/mt5-base
+  type: seq2seq
+
+training:
+  seed: 42
+  max_input_length: 256
+  max_target_length: 512
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 3.0e-4
+  num_epochs: 5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  fp16: true
+  logging_steps: 100
+  save_steps: 500
+  eval_steps: 500
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+
+generation:
+  num_beams: 4
+  max_new_tokens: 512
+  length_penalty: 1.0
+  no_repeat_ngram_size: 3
+
+retrieval:
+  top_k: 5
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  dense_model: sentence-transformers/LaBSE
+  dense_batch_size: 64
+  hybrid_alpha: 0.5
+
+evaluation:
+  bertscore_model: Davlan/afro-xlmr-base
