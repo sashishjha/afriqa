@@ -1,0 +1,121 @@
+trainable params: 1,769,472 || all params: 584,170,752 || trainable%: 0.3029
+{'loss': 14.0924, 'grad_norm': 14.407724380493164, 'learning_rate': 0.00029004329004329003, 'epoch': 0.65}
+{'loss': 4.8649, 'grad_norm': 0.6039198637008667, 'learning_rate': 0.00024675324675324674, 'epoch': 1.29}
+{'loss': 3.8704, 'grad_norm': 0.591150164604187, 'learning_rate': 0.00020346320346320345, 'epoch': 1.94}
+{'loss': 3.6326, 'grad_norm': 0.5574337840080261, 'learning_rate': 0.00016017316017316016, 'epoch': 2.58}
+{'loss': 3.4922, 'grad_norm': 0.5292462706565857, 'learning_rate': 0.00011688311688311687, 'epoch': 3.23}
+{'eval_loss': 3.471848487854004, 'eval_rouge1': 0.14860176683361498, 'eval_rougeL': 0.12600201647191148, 'eval_runtime': 10515.9468, 'eval_samples_per_second': 0.498, 'eval_steps_per_second': 0.062, 'epoch': 3.23}
+{'loss': 3.4081, 'grad_norm': 0.6699049472808838, 'learning_rate': 7.359307359307358e-05, 'epoch': 3.88}
+{'loss': 3.3634, 'grad_norm': 0.9946695566177368, 'learning_rate': 3.03030303030303e-05, 'epoch': 4.52}
+{'train_runtime': 11757.2914, 'train_samples_per_second': 2.103, 'train_steps_per_second': 0.065, 'train_loss': 5.072163113680753, 'epoch': 4.98}
+  [predict] 8/5233
+  [predict] 88/5233
+  [predict] 168/5233
+  [predict] 248/5233
+  [predict] 328/5233
+  [predict] 408/5233
+  [predict] 488/5233
+  [predict] 568/5233
+  [predict] 648/5233
+  [predict] 728/5233
+  [predict] 808/5233
+  [predict] 888/5233
+  [predict] 968/5233
+  [predict] 1048/5233
+  [predict] 1128/5233
+  [predict] 1208/5233
+  [predict] 1288/5233
+  [predict] 1368/5233
+  [predict] 1448/5233
+  [predict] 1528/5233
+  [predict] 1608/5233
+  [predict] 1688/5233
+  [predict] 1768/5233
+  [predict] 1848/5233
+  [predict] 1928/5233
+  [predict] 2008/5233
+  [predict] 2088/5233
+  [predict] 2168/5233
+  [predict] 2248/5233
+  [predict] 2328/5233
+  [predict] 2408/5233
+  [predict] 2488/5233
+  [predict] 2568/5233
+  [predict] 2648/5233
+  [predict] 2728/5233
+  [predict] 2808/5233
+  [predict] 2888/5233
+  [predict] 2968/5233
+  [predict] 3048/5233
+  [predict] 3128/5233
+  [predict] 3208/5233
+  [predict] 3288/5233
+  [predict] 3368/5233
+  [predict] 3448/5233
+  [predict] 3528/5233
+  [predict] 3608/5233
+  [predict] 3688/5233
+  [predict] 3768/5233
+  [predict] 3848/5233
+  [predict] 3928/5233
+  [predict] 4008/5233
+  [predict] 4088/5233
+  [predict] 4168/5233
+  [predict] 4248/5233
+  [predict] 4328/5233
+  [predict] 4408/5233
+  [predict] 4488/5233
+  [predict] 4568/5233
+  [predict] 4648/5233
+  [predict] 4728/5233
+  [predict] 4808/5233
+  [predict] 4888/5233
+  [predict] 4968/5233
+  [predict] 5048/5233
+  [predict] 5128/5233
+  [predict] 5208/5233
+
+========================================================================
+EVALUATION REPORT
+========================================================================
+  Aka_Gha           n= 1114  ROUGE-1=0.2322  ROUGE-L=0.1834
+  Amh_Eth           n=  462  ROUGE-1=0.0073  ROUGE-L=0.0073
+  Eng_Eth           n=  564  ROUGE-1=0.1884  ROUGE-L=0.1465
+  Eng_Gha           n= 1104  ROUGE-1=0.2511  ROUGE-L=0.2124
+  Eng_Ken           n=  390  ROUGE-1=0.1248  ROUGE-L=0.1040
+  Eng_Uga           n= 1599  ROUGE-1=0.0932  ROUGE-L=0.0748
+  __global__        n= 5233  ROUGE-1=0.1611  ROUGE-L=0.1309
+========================================================================
+  [predict] 8/2618
+  [predict] 88/2618
+  [predict] 168/2618
+  [predict] 248/2618
+  [predict] 328/2618
+  [predict] 408/2618
+  [predict] 488/2618
+  [predict] 568/2618
+  [predict] 648/2618
+  [predict] 728/2618
+  [predict] 808/2618
+  [predict] 888/2618
+  [predict] 968/2618
+  [predict] 1048/2618
+  [predict] 1128/2618
+  [predict] 1208/2618
+  [predict] 1288/2618
+  [predict] 1368/2618
+  [predict] 1448/2618
+  [predict] 1528/2618
+  [predict] 1608/2618
+  [predict] 1688/2618
+  [predict] 1768/2618
+  [predict] 1848/2618
+  [predict] 1928/2618
+  [predict] 2008/2618
+  [predict] 2088/2618
+  [predict] 2168/2618
+  [predict] 2248/2618
+  [predict] 2328/2618
+  [predict] 2408/2618
+  [predict] 2488/2618
+  [predict] 2568/2618

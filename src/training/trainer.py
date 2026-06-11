@@ -74,6 +74,8 @@ def setup_seq2seq_model(
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
 
     if use_lora:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -105,6 +107,8 @@ def setup_causal_model(
     tokenizer.padding_side = "left"
 
     if use_lora:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -217,6 +221,7 @@ def train_seq2seq(
         report_to="none",
         dataloader_num_workers=0,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         optim="adafactor",
     )
     collator = DataCollatorForSeq2Seq(tokenizer, model=model)
@@ -278,6 +283,7 @@ def train_causal(
         report_to="none",
         dataloader_num_workers=0,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     trainer = Trainer(
