@@ -64,6 +64,21 @@ class Predictor:
         return all_preds
 
 
+def get_latest_checkpoint(output_dir: str) -> str:
+    """Finds the checkpoint with the highest step number in output_dir."""
+    if not os.path.isdir(output_dir):
+        return None
+    checkpoints = [
+        d for d in os.listdir(output_dir)
+        if d.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, d))
+    ]
+    if not checkpoints:
+        return None
+    # Sort by the number after "checkpoint-"
+    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+    return os.path.join(output_dir, checkpoints[-1])
+
+
 # ── main ────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -80,6 +95,10 @@ def parse_args():
                    help="Skip training; load from output_dir/best_model")
     p.add_argument("--skip_eval", action="store_true")
     p.add_argument("--skip_submission", action="store_true")
+    p.add_argument("--resume_checkpoint", type=str, default=None,
+                   help="Path to a specific checkpoint to resume from (overrides automatic discovery).")
+    p.add_argument("--merge_val", action="store_true",
+                   help="Merge train+val into one training set (for final submission runs).")
     return p.parse_args()
 
 
@@ -104,12 +123,15 @@ def main():
     max_input = cfg["training"]["max_input_length"]
     max_target = cfg["training"]["max_target_length"]
     gen_kwargs = cfg["generation"]
+    input_prefix = cfg.get("prompt", {}).get("input_prefix", "answer_question: ")
+    lora_targets = cfg["lora"].get("target_modules", None)  # None = use auto-detection
 
     logger.info(f"Model          : {model_name}")
     logger.info(f"LoRA r         : {lora_r}")
     logger.info(f"Batch size     : {batch_size}")
     logger.info(f"Epochs         : {num_epochs}")
     logger.info(f"Learning rate  : {lr}")
+    logger.info(f"Prompt prefix  : {repr(input_prefix)}")
 
     # ── data ────────────────────────────────────────────────────────
     logger.info("Loading data …")
@@ -118,6 +140,12 @@ def main():
     test_df = load_data(cfg["data"]["test_path"])
 
     logger.info(f"Train : {len(train_df):,}  |  Val : {len(val_df):,}  |  Test : {len(test_df):,}")
+
+    # ── merge train+val if requested (final submission mode) ─────────
+    if args.merge_val:
+        logger.info("Merging train + val into single training set …")
+        train_df = pd.concat([train_df, val_df], ignore_index=True)
+        logger.info(f"Merged train size: {len(train_df):,}")
 
     # ── model + tokeniser ───────────────────────────────────────────
     if args.skip_train:
@@ -131,15 +159,40 @@ def main():
             lora_r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
+            target_modules=lora_targets,
         )
 
     # ── tokenise ────────────────────────────────────────────────────
     logger.info("Tokenising datasets …")
-    train_ds = create_seq2seq_dataset(train_df, tokenizer, max_input, max_target)
-    val_ds = create_seq2seq_dataset(val_df, tokenizer, max_input, max_target)
+    train_ds = create_seq2seq_dataset(train_df, tokenizer, max_input, max_target,
+                                      input_prefix=input_prefix)
+
+    if args.merge_val:
+        # val_df is now part of training — use a small proxy sample for Trainer's
+        # periodic eval (just to monitor loss; don't treat as true held-out score)
+        proxy_val_df = val_df.sample(n=min(500, len(val_df)), random_state=42)
+        val_ds = create_seq2seq_dataset(proxy_val_df, tokenizer, max_input, max_target,
+                                        input_prefix=input_prefix)
+        logger.info(f"merge_val=True: using {len(proxy_val_df)} sample proxy val (not held-out)")
+    else:
+        val_ds = create_seq2seq_dataset(val_df, tokenizer, max_input, max_target,
+                                        input_prefix=input_prefix)
+
 
     # ── train ───────────────────────────────────────────────────────
     if not args.skip_train:
+        resume_checkpoint = None
+        if args.resume_checkpoint:
+            resume_checkpoint = args.resume_checkpoint
+            logger.info(f"Using user-specified checkpoint:\n    {resume_checkpoint}\n    Resuming training.")
+        else:
+            latest = get_latest_checkpoint(args.output_dir)
+            if latest:
+                resume_checkpoint = latest
+                logger.info(f"Found latest checkpoint:\n    {resume_checkpoint}\n\n    Resuming training.")
+            else:
+                logger.info("No checkpoint found.\nStarting training from scratch.")
+
         logger.info("Starting training …")
         trainer = train_seq2seq(
             model=model,
@@ -159,9 +212,24 @@ def main():
             eval_steps=cfg["training"]["eval_steps"],
             gen_max_length=gen_kwargs["max_new_tokens"],
             num_beams=gen_kwargs["num_beams"],
+            length_penalty=gen_kwargs.get("length_penalty", 0.8),
+            min_length=gen_kwargs.get("min_length", 15),
+            resume_from_checkpoint=resume_checkpoint,
         )
         model = trainer.model
         logger.info("Training complete.")
+
+    # ── DDP safety: unwrap model + gate eval/submission to rank 0 ──
+    # After torchrun, model is wrapped in DistributedDataParallel.
+    # .generate() on a DDP model crashes on ROCm. Unwrap it.
+    if hasattr(model, "module"):
+        model = model.module
+        logger.info("Unwrapped model from DDP wrapper for inference.")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank != 0:
+        logger.info(f"Rank {local_rank}: training done. Exiting (rank 0 handles eval+submission).")
+        return
 
     # ── evaluation ──────────────────────────────────────────────────
     predictor = None
@@ -174,12 +242,14 @@ def main():
             gen_kwargs={
                 "max_new_tokens": gen_kwargs["max_new_tokens"],
                 "num_beams": gen_kwargs["num_beams"],
-                "length_penalty": gen_kwargs["length_penalty"],
+                "length_penalty": gen_kwargs.get("length_penalty", 0.8),
                 "no_repeat_ngram_size": gen_kwargs["no_repeat_ngram_size"],
+                "min_length": gen_kwargs.get("min_length", 15),
                 "early_stopping": True,
             },
         )
-        val_preds = predictor.predict_batch(val_df["input"].tolist(), batch_size=batch_size)
+        val_preds = predictor.predict_batch(val_df["input"].tolist(), batch_size=batch_size,
+                                             input_prefix=input_prefix)
 
         evaluator = Evaluator(bertscore_model=cfg["evaluation"]["bertscore_model"])
         per_subset = evaluator.evaluate_per_subset(
@@ -202,15 +272,24 @@ def main():
                 gen_kwargs={
                     "max_new_tokens": gen_kwargs["max_new_tokens"],
                     "num_beams": gen_kwargs["num_beams"],
-                    "length_penalty": gen_kwargs["length_penalty"],
+                    "length_penalty": gen_kwargs.get("length_penalty", 0.8),
                     "no_repeat_ngram_size": gen_kwargs["no_repeat_ngram_size"],
+                    "min_length": gen_kwargs.get("min_length", 15),
                     "early_stopping": True,
                 },
             )
-        test_preds = predictor.predict_batch(test_df["input"].tolist(), batch_size=batch_size)
+        test_preds = predictor.predict_batch(test_df["input"].tolist(), batch_size=batch_size,
+                                              input_prefix=input_prefix)
 
-        sub = pd.DataFrame({"ID": test_df["ID"], "output": test_preds})
-        sub_path = os.path.join("submissions", "exp1_submission.csv")
+        sub = pd.DataFrame({
+            "ID": test_df["ID"], 
+            "TargetRLF1": test_preds,
+            "TargetR1F1": test_preds,
+            "TargetLLM": test_preds
+        })
+        # Derive submission name from output_dir (e.g. "outputs/exp2_optimized" → "exp2_optimized_submission.csv")
+        exp_name = os.path.basename(args.output_dir.rstrip("/"))
+        sub_path = os.path.join("submissions", f"{exp_name}_submission.csv")
         os.makedirs("submissions", exist_ok=True)
         sub.to_csv(sub_path, index=False)
         logger.info(f"Submission saved to {sub_path}  ({len(sub)} rows)")
@@ -218,3 +297,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # Clean DDP shutdown (prevents hangs when non-rank-0 processes exit)
+    import torch.distributed as dist
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()

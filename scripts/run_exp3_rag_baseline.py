@@ -25,6 +25,7 @@ from src.data_loader import load_data, create_seq2seq_dataset
 from src.retrieval.bm25_retriever import BM25Retriever
 from src.retrieval.dense_retriever import DenseRetriever
 from src.retrieval.hybrid_retriever import HybridRetriever
+from src.retrieval.tfidf_retriever import TFIDFRetriever
 from src.training.trainer import setup_seq2seq_model, load_trained_model, train_seq2seq
 from src.rag.pipeline import RAGPipeline
 from src.evaluation.evaluator import Evaluator
@@ -38,7 +39,7 @@ def parse_args():
     p.add_argument("--exp1_model_dir", type=str, default="outputs/exp1_generation/best_model",
                    help="Path to trained Exp 1 model. If not found, trains from scratch.")
     p.add_argument("--retriever_type", type=str, default="hybrid",
-                   choices=["bm25", "dense", "hybrid"])
+                   choices=["bm25", "dense", "hybrid", "tfidf"])
     p.add_argument("--dense_model", type=str, default=None)
     p.add_argument("--hybrid_alpha", type=float, default=0.5)
     p.add_argument("--top_k", type=int, default=5)
@@ -70,6 +71,18 @@ def build_retriever(args, cfg, train_df, logger, device="cpu"):
         dense_ret.build_index(corpus_q, corpus_a,
                               batch_size=cfg["retrieval"]["dense_batch_size"])
 
+    if args.retriever_type == "tfidf":
+        logger.info("Building TF-IDF character n-gram index (competitor approach) …")
+        tfidf_ret = TFIDFRetriever(
+            analyzer=cfg["retrieval"].get("tfidf_analyzer", "char_wb"),
+            ngram_range=(
+                cfg["retrieval"].get("tfidf_ngram_min", 2),
+                cfg["retrieval"].get("tfidf_ngram_max", 5),
+            ),
+        )
+        tfidf_ret.build_index(corpus_q, corpus_a)
+        return tfidf_ret
+
     if args.retriever_type == "bm25":
         return bm25_ret
     if args.retriever_type == "dense":
@@ -97,6 +110,18 @@ def main():
 
     # ── retriever ───────────────────────────────────────────────────
     retriever = build_retriever(args, cfg, train_df, logger, device=str(device))
+
+    # Free GPU memory used by DenseRetriever's SentenceTransformer encoder.
+    # The FAISS index is already on CPU; only the encoder model was on GPU.
+    # We must free it before loading the mT5 generator onto the same GPU.
+    if hasattr(retriever, 'model'):
+        # DenseRetriever
+        retriever.model = retriever.model.cpu()
+    elif hasattr(retriever, 'dense') and retriever.dense is not None:
+        # HybridRetriever wrapping a DenseRetriever
+        retriever.dense.model = retriever.dense.model.cpu()
+    torch.cuda.empty_cache()
+    logger.info("Freed GPU memory from retriever encoder.")
 
     # ── generator ───────────────────────────────────────────────────
     if os.path.isdir(args.exp1_model_dir):
@@ -190,8 +215,14 @@ def main():
     if not args.skip_submission:
         logger.info("RAG inference on test set …")
         test_preds = rag.answer_batch(test_df["input"].tolist(), batch_size=args.batch_size)
-        sub = pd.DataFrame({"ID": test_df["ID"], "output": test_preds})
-        sub_path = os.path.join("submissions", "exp3_submission.csv")
+        sub = pd.DataFrame({
+            "ID": test_df["ID"],
+            "TargetRLF1": test_preds,
+            "TargetR1F1": test_preds,
+            "TargetLLM": test_preds,
+        })
+        sub_name = os.path.basename(args.output_dir.rstrip("/")) + "_submission.csv"
+        sub_path = os.path.join("submissions", sub_name)
         os.makedirs("submissions", exist_ok=True)
         sub.to_csv(sub_path, index=False)
         logger.info(f"Submission saved → {sub_path}  ({len(sub)} rows)")

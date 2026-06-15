@@ -41,6 +41,7 @@ _SEQ2SEQ_TARGETS = {
     "mt5": ["q", "v"],
     "byt5": ["q", "v"],
     "aya": ["q", "v"],
+    "afriteva": ["q", "v"],
     "nllb": ["q_proj", "v_proj"],
     "default": ["q", "v"],
 }
@@ -69,6 +70,7 @@ def setup_seq2seq_model(
     lora_alpha: int = 32,
     lora_dropout: float = 0.1,
     use_lora: bool = True,
+    target_modules: list = None,
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
@@ -76,11 +78,12 @@ def setup_seq2seq_model(
     if use_lora:
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
+        targets = target_modules or _pick_targets(model_name, _SEQ2SEQ_TARGETS)
         cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=_pick_targets(model_name, _SEQ2SEQ_TARGETS),
+            target_modules=targets,
             task_type=TaskType.SEQ_2_SEQ_LM,
         )
         model = get_peft_model(model, cfg)
@@ -188,12 +191,21 @@ def train_seq2seq(
     logging_steps: int = 100,
     save_steps: int = 500,
     eval_steps: int = 500,
-    gen_max_length: int = 512,
+    gen_max_length: int = 256,
     num_beams: int = 4,
+    length_penalty: float = 0.8,
+    min_length: int = 15,
+    resume_from_checkpoint: str = None,
 ):
-    # ROCm: use bf16 instead of fp16 (MI210 has native bfloat16 support)
+    # ROCm: use bf16 instead of fp16 (MI300X has native bfloat16 support)
     use_bf16 = _is_rocm() and torch.cuda.is_available()
     use_fp16 = (not _is_rocm()) and fp16 and torch.cuda.is_available()
+
+    # DDP safety: load_best_model_at_end deadlocks when multiple GPU processes
+    # all try to load the best checkpoint simultaneously.
+    import torch.distributed as dist
+    is_distributed = dist.is_available() and dist.is_initialized()
+    safe_load_best = not is_distributed
 
     args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
@@ -211,7 +223,7 @@ def train_seq2seq(
         eval_steps=eval_steps,
         eval_strategy="steps",
         save_strategy="steps",
-        load_best_model_at_end=True,
+        load_best_model_at_end=safe_load_best,  # False under DDP to avoid deadlock
         metric_for_best_model="rouge1",
         greater_is_better=True,
         predict_with_generate=True,
@@ -219,12 +231,13 @@ def train_seq2seq(
         generation_num_beams=num_beams,
         save_total_limit=3,
         report_to="none",
-        dataloader_num_workers=0,
+        dataloader_num_workers=0,   # 0 = safe for ROCm DDP (worker crashes otherwise)
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         optim="adafactor",
+        ddp_find_unused_parameters=False,  # required for LoRA layers under DDP
     )
-    collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+    collator = DataCollatorForSeq2Seq(tokenizer, model=model, pad_to_multiple_of=8)
     trainer = Seq2SeqTrainer(
         model=model,
         args=args,
@@ -233,7 +246,7 @@ def train_seq2seq(
         data_collator=collator,
         compute_metrics=_make_compute_metrics(tokenizer),
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(os.path.join(output_dir, "best_model"))
     tokenizer.save_pretrained(os.path.join(output_dir, "best_model"))
     return trainer
@@ -255,6 +268,7 @@ def train_causal(
     logging_steps: int = 100,
     save_steps: int = 500,
     eval_steps: int = 500,
+    resume_from_checkpoint: str = None,
 ):
     # ROCm: use bf16 instead of fp16 (MI210 has native bfloat16 support)
     use_bf16 = _is_rocm() and torch.cuda.is_available()
@@ -293,7 +307,7 @@ def train_causal(
         eval_dataset=val_ds,
         data_collator=collator,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(os.path.join(output_dir, "best_model"))
     tokenizer.save_pretrained(os.path.join(output_dir, "best_model"))
     return trainer

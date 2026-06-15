@@ -1,0 +1,74 @@
+# Experiment 10: THE BEST COMBO
+# ================================
+# mT5-Large + merged train+val + RAG inference
+# + Competitor-confirmed decoding settings
+#
+# This combines ALL THREE strategies that individually helped:
+#   1. mT5-Large (bigger model → more capacity for multilingual)
+#   2. Merged train+val (36k samples instead of 29k → more data)
+#   3. RAG inference (retrieval gives context → better answers)
+#   4. Competitor decoding (length_penalty=0.8, min_length=15)
+#
+# Expected: should significantly beat our current best of 0.255
+
+data:
+  train_path: Train.csv
+  val_path: Val.csv
+  test_path: Test.csv
+  subsets:
+    - Eng_Uga
+    - Aka_Gha
+    - Eng_Gha
+    - Eng_Eth
+    - Lug_Uga
+    - Eng_Ken
+    - Swa_Ken
+    - Amh_Eth
+
+model:
+  default: google/mt5-large   # 1.2B params
+  type: seq2seq
+
+training:
+  seed: 42
+  max_input_length: 256
+  max_target_length: 256
+  batch_size: 8               # per GPU — 3 GPUs × 8 = 24 per step
+  gradient_accumulation_steps: 2  # effective batch = 8×3×2 = 48
+  learning_rate: 3.0e-4       # AdaFactor fixed LR (competitor-confirmed)
+  num_epochs: 5               # More epochs since we're merging data
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  fp16: true
+  logging_steps: 50
+  save_steps: 500
+  eval_steps: 500
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+  target_modules:
+    - q
+    - v
+
+generation:
+  num_beams: 4
+  max_new_tokens: 256
+  length_penalty: 0.8         # Competitor-confirmed
+  no_repeat_ngram_size: 3
+  min_length: 15              # Competitor-confirmed
+
+prompt:
+  input_prefix: "answer_question: "
+
+retrieval:
+  top_k: 3                    # 3 examples as context (not 5 — saves token budget)
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  dense_model: sentence-transformers/LaBSE
+  dense_batch_size: 64
+  hybrid_alpha: 0.5
+
+evaluation:
+  bertscore_model: Davlan/afro-xlmr-base

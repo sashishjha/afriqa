@@ -73,13 +73,13 @@ def create_seq2seq_dataset(
         inputs = [f"{input_prefix}{q}" for q in batch["input"]]
         enc = tokenizer(
             inputs, max_length=max_input_length,
-            truncation=True, padding="max_length",
+            truncation=True,
         )
         if not is_test:
             lab = tokenizer(
                 text_target=batch["output"],
                 max_length=max_target_length,
-                truncation=True, padding="max_length",
+                truncation=True,
             )
             lab_ids = [
                 [(t if t != tokenizer.pad_token_id else -100) for t in seq]
