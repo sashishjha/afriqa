@@ -64,6 +64,29 @@ def _pick_targets(model_name: str, mapping: dict) -> list:
 
 # -- model factories --
 
+def safe_load_tokenizer(model_name: str):
+    """Loads tokenizer with use_fast=False for mT5/Aya/AfriTeVa reliability."""
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(model_name, use_fast=False, trust_remote_code=True)
+
+def safe_load_model(model_name: str, model_type="seq2seq"):
+    """Loads model with proper ROCm/GPU checks."""
+    from transformers import AutoModelForSeq2SeqLM, AutoModelForCausalLM
+    import torch
+    
+    if model_type == "seq2seq":
+        return AutoModelForSeq2SeqLM.from_pretrained(
+            model_name, 
+            trust_remote_code=True
+        )
+    else:
+        return AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=_get_dtype(),
+            trust_remote_code=True
+        )
+
+
 def setup_seq2seq_model(
     model_name: str,
     lora_r: int = 16,
@@ -72,8 +95,8 @@ def setup_seq2seq_model(
     use_lora: bool = True,
     target_modules: list = None,
 ):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=False)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = safe_load_tokenizer(model_name)
+    model = safe_load_model(model_name, model_type="seq2seq")
 
     if use_lora:
         if hasattr(model, "enable_input_require_grads"):
@@ -130,14 +153,10 @@ def load_trained_model(
     adapter_path: str,
     model_type: str = "seq2seq",
 ):
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True, use_fast=False)
-    if model_type == "seq2seq":
-        base = AutoModelForSeq2SeqLM.from_pretrained(base_model_name, trust_remote_code=True)
-    else:
-        # ROCm: use bfloat16 instead of float16
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_name, torch_dtype=_get_dtype(), trust_remote_code=True,
-        )
+    tokenizer = safe_load_tokenizer(base_model_name)
+    base = safe_load_model(base_model_name, model_type=model_type)
+    
+    if model_type != "seq2seq":
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             base.config.pad_token_id = tokenizer.eos_token_id

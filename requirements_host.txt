@@ -1,0 +1,7 @@
+# Host Python dependencies for run_gemma_vllm.py
+# Install on the login node: pip install --user -r requirements_host.txt
+pandas>=1.5
+scikit-learn>=1.0
+requests>=2.28
+tqdm>=4.60
+numpy>=1.21

@@ -40,6 +40,9 @@ def parse_args():
                    help="Path to trained Exp 1 model. If not found, trains from scratch.")
     p.add_argument("--retriever_type", type=str, default="hybrid",
                    choices=["bm25", "dense", "hybrid", "tfidf"])
+    p.add_argument("--per_subset_retrieval", action="store_true",
+                   help="Build separate TF-IDF retrievers per language subset "
+                        "(critical for Amharic Ge'ez script).")
     p.add_argument("--dense_model", type=str, default=None)
     p.add_argument("--hybrid_alpha", type=float, default=0.5)
     p.add_argument("--top_k", type=int, default=5)
@@ -92,6 +95,29 @@ def build_retriever(args, cfg, train_df, logger, device="cpu"):
     return HybridRetriever(bm25_ret, dense_ret, alpha=args.hybrid_alpha)
 
 
+from src.retrieval.tfidf_retriever import PerSubsetTFIDFRetriever
+
+def build_per_subset_retriever(args, cfg, train_df, logger):
+    """Build language-specific TF-IDF retrievers (one per subset)."""
+    logger.info("Building PER-SUBSET TF-IDF retrievers (Amharic fix enabled)...")
+
+    # Ensure 'subset' column exists in train_df
+    if "subset" not in train_df.columns:
+        logger.warning("No 'subset' column in training data — falling back to global retriever.")
+        return None
+
+    retriever = PerSubsetTFIDFRetriever(
+        ngram_range=(2, 5),
+        max_features=80000,
+    )
+    retriever.fit(
+        questions=train_df["input"].tolist(),
+        answers=train_df["output"].tolist(),
+        subsets=train_df["subset"].tolist(),
+    )
+    return retriever
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -108,8 +134,19 @@ def main():
     val_df = load_data(cfg["data"]["val_path"])
     test_df = load_data(cfg["data"]["test_path"])
 
+    # Preserve subset column for per-subset retrieval in case downstream code drops it
+    val_subset_col = val_df["subset"].copy() if "subset" in val_df.columns else None
+    test_subset_col = test_df["subset"].copy() if "subset" in test_df.columns else None
+
     # ── retriever ───────────────────────────────────────────────────
-    retriever = build_retriever(args, cfg, train_df, logger, device=str(device))
+    if args.per_subset_retrieval and args.retriever_type == "tfidf":
+        per_subset_ret = build_per_subset_retriever(args, cfg, train_df, logger)
+        logger.info("✅ Per-subset TF-IDF retrieval enabled (Amharic fix active)")
+        retriever = per_subset_ret
+    else:
+        # Original single-retriever path (now also benefits from Ge'ez transliteration)
+        retriever = build_retriever(args, cfg, train_df, logger, device=str(device))
+        logger.info("✅ Global retriever built (Ge'ez transliteration is automatic)")
 
     # Free GPU memory used by DenseRetriever's SentenceTransformer encoder.
     # The FAISS index is already on CPU; only the encoder model was on GPU.
@@ -184,7 +221,11 @@ def main():
     # ── evaluate ────────────────────────────────────────────────────
     if not args.skip_eval:
         logger.info("RAG inference on validation set …")
-        val_preds = rag.answer_batch(val_df["input"].tolist(), batch_size=args.batch_size)
+        if val_subset_col is not None and "subset" not in val_df.columns:
+            val_df["subset"] = val_subset_col.values
+            logger.info("✅ 'subset' column preserved for per-subset retrieval")
+        val_subsets = val_df["subset"].tolist() if args.per_subset_retrieval and args.retriever_type == "tfidf" else None
+        val_preds = rag.answer_batch(val_df["input"].tolist(), batch_size=args.batch_size, subsets=val_subsets)
 
         evaluator = Evaluator(bertscore_model=cfg["evaluation"]["bertscore_model"])
         per_subset = evaluator.evaluate_per_subset(
@@ -214,7 +255,11 @@ def main():
     # ── submission ──────────────────────────────────────────────────
     if not args.skip_submission:
         logger.info("RAG inference on test set …")
-        test_preds = rag.answer_batch(test_df["input"].tolist(), batch_size=args.batch_size)
+        if test_subset_col is not None and "subset" not in test_df.columns:
+            test_df["subset"] = test_subset_col.values
+            logger.info("✅ 'subset' column preserved for per-subset retrieval")
+        test_subsets = test_df["subset"].tolist() if args.per_subset_retrieval and args.retriever_type == "tfidf" else None
+        test_preds = rag.answer_batch(test_df["input"].tolist(), batch_size=args.batch_size, subsets=test_subsets)
         sub = pd.DataFrame({
             "ID": test_df["ID"],
             "TargetRLF1": test_preds,

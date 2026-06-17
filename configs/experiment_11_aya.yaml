@@ -1,0 +1,72 @@
+# ================================================================
+# Experiment 11: Aya-101 (CohereForAI)
+# ================================================================
+# 13B seq2seq (mT5-XXL based), instruction-tuned on 101 languages.
+# Competitors report this as a top-performing model.
+# Strategy: LoRA r=8 + gradient checkpointing + small batch + fp16
+# Expected: significant improvement over mT5-Large (1.2B → 13B)
+# ================================================================
+
+data:
+  train_path: Train.csv
+  val_path: Val.csv
+  test_path: Test.csv
+  subsets:
+    - Eng_Uga
+    - Aka_Gha
+    - Eng_Gha
+    - Eng_Eth
+    - Lug_Uga
+    - Eng_Ken
+    - Swa_Ken
+    - Amh_Eth
+
+model:
+  # NOTE: If "CohereForAI/aya-101" 404s, try "CohereLabs/aya-101"
+  default: CohereForAI/aya-101
+  type: seq2seq
+
+training:
+  seed: 42
+  max_input_length: 256
+  max_target_length: 256
+  batch_size: 2                  # Per GPU — 13B model needs small batches
+  gradient_accumulation_steps: 8 # Effective batch = 2×3×8 = 48
+  learning_rate: 1.0e-4          # Lower LR for large model + LoRA
+  num_epochs: 3                  # Fewer epochs — large model converges faster
+  warmup_ratio: 0.06
+  weight_decay: 0.01
+  fp16: true
+  gradient_checkpointing: true   # CRITICAL for 13B model on 64GB GPUs
+  logging_steps: 25
+  save_steps: 300
+  eval_steps: 300
+
+lora:
+  r: 8                           # Lower rank to save memory (13B model)
+  alpha: 16                      # alpha = 2*r
+  dropout: 0.05
+  target_modules:
+    - q
+    - v
+
+generation:
+  num_beams: 4
+  max_new_tokens: 256
+  length_penalty: 0.8
+  no_repeat_ngram_size: 3
+  min_length: 15
+
+prompt:
+  input_prefix: "answer_question: "
+
+retrieval:
+  top_k: 3
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  dense_model: sentence-transformers/LaBSE
+  dense_batch_size: 64
+  hybrid_alpha: 0.5
+
+evaluation:
+  bertscore_model: Davlan/afro-xlmr-base

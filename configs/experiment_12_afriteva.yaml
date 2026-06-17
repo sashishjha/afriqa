@@ -1,0 +1,73 @@
+# ================================================================
+# Experiment 12: AfriTeVa V2 Large (castorini)
+# ================================================================
+# 1B T5-v1.1, pretrained on 20 languages (16 African + 4 global).
+# "More than twice as effective as mT5 on cross-lingual QA."
+# Key: Dropout was OFF in pretraining — MUST re-enable for finetuning.
+# ================================================================
+
+data:
+  train_path: Train.csv
+  val_path: Val.csv
+  test_path: Test.csv
+  subsets:
+    - Eng_Uga
+    - Aka_Gha
+    - Eng_Gha
+    - Eng_Eth
+    - Lug_Uga
+    - Eng_Ken
+    - Swa_Ken
+    - Amh_Eth
+
+model:
+  default: castorini/afriteva_v2_large   # 1B params, T5 v1.1, vocab=150K
+  type: seq2seq
+
+training:
+  seed: 42
+  max_input_length: 256
+  max_target_length: 256
+  batch_size: 8                  # Per GPU — 1B model is similar size to mT5-Large
+  gradient_accumulation_steps: 2 # Effective batch = 8×3×2 = 48
+  learning_rate: 3.0e-4          # AdaFactor fixed LR
+  num_epochs: 5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  fp16: true
+  gradient_checkpointing: false  # 1B model fits fine without this
+  logging_steps: 50
+  save_steps: 500
+  eval_steps: 500
+  # ── AfriTeVa-specific ──
+  dropout_override: 0.1          # RE-ENABLE dropout (was OFF in pretraining)
+  use_fast_tokenizer: false      # Force SentencePiece slow tokenizer
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.1
+  target_modules:
+    - q
+    - v
+
+generation:
+  num_beams: 4
+  max_new_tokens: 256
+  length_penalty: 0.8
+  no_repeat_ngram_size: 3
+  min_length: 15
+
+prompt:
+  input_prefix: "answer_question: "
+
+retrieval:
+  top_k: 3
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  dense_model: sentence-transformers/LaBSE
+  dense_batch_size: 64
+  hybrid_alpha: 0.5
+
+evaluation:
+  bertscore_model: Davlan/afro-xlmr-base

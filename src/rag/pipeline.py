@@ -60,13 +60,18 @@ class RAGPipeline:
 
     # -- batch --
 
-    def answer_batch(self, questions: list, batch_size: int = 8) -> list:
+    def answer_batch(self, questions: list, batch_size: int = 8, subsets: list = None) -> list:
         preds = []
         for start in tqdm(range(0, len(questions), batch_size), desc="RAG gen"):
             batch_q = questions[start : start + batch_size]
+            if subsets:
+                batch_s = subsets[start : start + batch_size]
             prompts = []
-            for q in batch_q:
-                docs = self.retriever.retrieve(q, self.top_k)
+            for idx, q in enumerate(batch_q):
+                if subsets:
+                    docs = self.retriever.retrieve(q, subset=batch_s[idx], top_k=self.top_k)
+                else:
+                    docs = self.retriever.retrieve(q, self.top_k)
                 ctx = self.build_context(docs)
                 prompts.append(self._make_prompt(q, ctx))
             enc = self.tokenizer(
@@ -84,18 +89,46 @@ class RAGPipeline:
 
     # -- augment a DataFrame for training-time RAG --
 
-    def augment_dataframe(self, df, top_k: int = 3):
-        """Return a copy of *df* with ``input`` replaced by contextual prompts.
-        Self-hits (exact-match questions) are excluded from context.
+    def augment_dataframe(self, df, top_k=3):
         """
-        import pandas as pd
-        aug_inputs = []
-        for idx in tqdm(range(len(df)), desc="Augmenting"):
-            q = df.iloc[idx]["input"]
-            docs = self.retriever.retrieve(q, top_k + 1)
-            docs = [d for d in docs if d["question"].strip() != q.strip()][:top_k]
+        Augment each row in df with retrieved context.
+        Supports both global TFIDFRetriever and PerSubsetTFIDFRetriever.
+        """
+        from src.retrieval.tfidf_retriever import PerSubsetTFIDFRetriever
+        import logging
+        logger = logging.getLogger("afriqa")
+
+        is_per_subset = isinstance(self.retriever, PerSubsetTFIDFRetriever)
+
+        augmented_inputs = []
+        for idx, row in df.iterrows():
+            query = row["input"]
+
+            # ── Route to the correct retriever signature ──────────
+            if is_per_subset:
+                # PerSubsetTFIDFRetriever needs the subset label
+                subset = row.get("subset", None)
+                if subset is None:
+                    logger.warning(
+                        f"Row {idx}: no 'subset' column found — "
+                        f"falling back to global retriever"
+                    )
+                    results = self.retriever.fallback_retriever.retrieve(query, top_k=top_k + 1)
+                else:
+                    results = self.retriever.retrieve(query, subset=subset, top_k=top_k + 1)
+            else:
+                # Standard TFIDFRetriever / BM25 / Dense / Hybrid
+                results = self.retriever.retrieve(query, top_k=top_k + 1)
+
+            docs = [d for d in results if d["question"].strip() != query.strip()][:top_k]
             ctx = self.build_context(docs)
-            aug_inputs.append(f"context: {ctx} question: {q}")
+            augmented_input = f"context: {ctx} question: {query}" if ctx else query
+            augmented_inputs.append(augmented_input)
+
         out = df.copy()
-        out["input"] = aug_inputs
+        out["input"] = augmented_inputs
+        logger.info(
+            f"Augmented {len(df)} rows with top-{top_k} retrieval "
+            f"(per_subset={is_per_subset})"
+        )
         return out

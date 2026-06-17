@@ -28,6 +28,59 @@ from src.evaluation.evaluator import Evaluator
 
 # ── helpers ─────────────────────────────────────────────────────────
 
+def preflight_model_check(model_name: str, cfg: dict, logger):
+    """
+    Apply model-specific configuration overrides and safety checks.
+    Call this BEFORE setup_seq2seq_model().
+    Returns: updated cfg dict.
+    """
+    model_lower = model_name.lower()
+
+    # ── Aya-101 (13B, mT5-XXL based) ──────────────────────────
+    if "aya-101" in model_lower or "aya_101" in model_lower:
+        logger.info("🔍 Detected Aya-101 model — applying 13B-specific settings...")
+
+        # Force gradient checkpointing for memory
+        cfg.setdefault("training", {})
+        cfg["training"]["gradient_checkpointing"] = True
+
+        # Warn about memory
+        import torch
+        if torch.cuda.is_available():
+            vram_gb = torch.cuda.get_device_properties(0).total_memory // (1024**3)
+            logger.info(f"   GPU VRAM: {vram_gb} GB")
+            if vram_gb < 40:
+                logger.warning(
+                    f"   ⚠️  Aya-101 needs ~26GB per GPU in fp16. "
+                    f"Your GPU has {vram_gb}GB — this may OOM. "
+                    f"Consider reducing batch_size to 1 or using LoRA r=4."
+                )
+
+    # ── AfriTeVa V2 (T5 v1.1 based) ──────────────────────────
+    elif "afriteva" in model_lower:
+        logger.info("🔍 Detected AfriTeVa V2 model — applying T5-v1.1 fixes...")
+
+        # AfriTeVa was pretrained with dropout OFF — re-enable it
+        cfg.setdefault("training", {})
+        if "dropout_override" not in cfg["training"]:
+            cfg["training"]["dropout_override"] = 0.1
+            logger.info("   ✅ Dropout re-enabled (0.1) for finetuning")
+
+        # T5 v1.1 uses gated-gelu; ensure transformers version supports it
+        try:
+            from transformers import T5Config
+            test_cfg = T5Config(feed_forward_proj="gated-gelu")
+            logger.info("   ✅ gated-gelu activation supported")
+        except Exception as e:
+            logger.error(
+                f"   ❌ gated-gelu not supported by your transformers version: {e}\n"
+                f"   Run: pip install transformers>=4.30.0"
+            )
+            raise
+
+    return cfg
+
+
 class Predictor:
     """Lightweight seq2seq predictor (self-contained so file runs standalone)."""
 
@@ -113,6 +166,7 @@ def main():
 
     # ── resolve hyper-params ────────────────────────────────────────
     model_name = args.model_name or cfg["model"]["default"]
+    cfg = preflight_model_check(model_name, cfg, logger)
     batch_size = args.batch_size or cfg["training"]["batch_size"]
     num_epochs = args.epochs or cfg["training"]["num_epochs"]
     lr = args.lr or cfg["training"]["learning_rate"]
@@ -161,6 +215,38 @@ def main():
             lora_dropout=lora_dropout,
             target_modules=lora_targets,
         )
+
+        # ═══ NEW: Post-setup model patches (Aya, AfriTeVa, etc.) ══════════
+        model_lower = model_name.lower()
+
+        # ── AfriTeVa: re-enable dropout (was OFF during pretraining) ──────
+        dropout_override = cfg.get("training", {}).get("dropout_override", None)
+        if dropout_override is not None:
+            patched = 0
+            for module in model.modules():
+                if hasattr(module, "dropout") and hasattr(module.dropout, "p"):
+                    module.dropout.p = dropout_override
+                    patched += 1
+                if hasattr(module, "dropout_rate"):
+                    module.dropout_rate = dropout_override
+                    patched += 1
+            logger.info(f"✅ Dropout overridden to {dropout_override} ({patched} modules patched)")
+
+        # ── Large models (Aya-101): enable gradient checkpointing ─────────
+        if cfg.get("training", {}).get("gradient_checkpointing", False):
+            model.gradient_checkpointing_enable()
+            logger.info("✅ Gradient checkpointing enabled")
+
+        # ── Tokenizer: force slow SentencePiece if config says so ─────────
+        use_fast = cfg.get("training", {}).get("use_fast_tokenizer", True)
+        if not use_fast and tokenizer.is_fast:
+            logger.info("⚠️  Config requests use_fast=False but got fast tokenizer. Reloading...")
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, use_fast=False, trust_remote_code=True
+            )
+            logger.info(f"✅ Slow tokenizer reloaded: vocab_size={tokenizer.vocab_size}")
+        # ═══ END post-setup patches ═══════════════════════════════════════
 
     # ── tokenise ────────────────────────────────────────────────────
     logger.info("Tokenising datasets …")
