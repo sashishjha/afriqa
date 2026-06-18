@@ -150,6 +150,8 @@ class TFIDFRetriever:
         ngram_range: Tuple[int, int] = (2, 5),
         max_features: int = 80000,
         sublinear_tf: bool = True,
+        min_df: int = 2,
+        max_df: float = 0.95,
     ):
         """
         Args:
@@ -157,16 +159,22 @@ class TFIDFRetriever:
                          (2,5) works well after Ge'ez transliteration.
             max_features: Max vocabulary size for the vectoriser.
             sublinear_tf: Use sublinear TF scaling (log(1 + tf)).
+            min_df: Ignore terms with document frequency lower than this.
+            max_df: Ignore terms with document frequency higher than this.
         """
         self.ngram_range = ngram_range
         self.max_features = max_features
         self.sublinear_tf = sublinear_tf
+        self.min_df = min_df
+        self.max_df = max_df
 
         self.vectorizer = TfidfVectorizer(
             analyzer="char_wb",      # char_wb = character n-grams within word boundaries
             ngram_range=self.ngram_range,
             max_features=self.max_features,
             sublinear_tf=self.sublinear_tf,
+            min_df=self.min_df,
+            max_df=self.max_df,
             strip_accents=None,      # We handle normalisation ourselves
             dtype=np.float32,
         )

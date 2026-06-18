@@ -39,6 +39,11 @@ import numpy as np
 import pandas as pd
 import requests
 
+# Ensure we can import from src/
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.retrieval.tfidf_retriever import TFIDFRetriever, preprocess_text
+
 # ===========================================================================
 # DEFAULT PATHS & CONSTANTS
 # ===========================================================================
@@ -48,16 +53,16 @@ MODEL_NAME       = "gemma-4-31B-it"
 TOP_K            = 5
 
 # Per-subset retrieval thresholds (cosine similarity)
-# Currently set to uniform 0.96 for Experiment A
+# Tuned to p90 of in-sample training data distribution (Experiment B)
 SUBSET_THRESHOLDS = {
-    "Eng_Uga": 0.96,
-    "Eng_Ken": 0.96,
-    "Swa_Ken": 0.96,
-    "Lug_Uga": 0.96,
-    "Eng_Eth": 0.96,
-    "Aka_Gha": 0.96,
-    "Eng_Gha": 0.96,
-    "Amh_Eth": 0.96,
+    "Aka_Gha": 0.979,
+    "Amh_Eth": 0.988,
+    "Eng_Eth": 0.997,  # Pulled back from 0.999 for safety
+    "Eng_Gha": 0.966,
+    "Eng_Ken": 0.989,
+    "Eng_Uga": 0.995,
+    "Lug_Uga": 0.983,
+    "Swa_Ken": 0.988,
 }
 
 # Language names (used in prompts)
@@ -551,13 +556,26 @@ def main():
         batch_size=128, desc="Encoding TEST questions"
     )
 
+    logger.info("[2.5/6] Building TF-IDF sparse index for Hybrid Re-ranking...")
+    tfidf = TFIDFRetriever(ngram_range=(3, 5), max_features=80000, min_df=2, max_df=0.95)
+    tfidf.fit(train_questions, train_df[a_col].tolist())
+    
+    logger.info("  Encoding TEST questions with TF-IDF...")
+    test_questions_proc = [preprocess_text(q) for q in test_questions]
+    test_sparse_matrix = tfidf.vectorizer.transform(test_questions_proc)
+    
+    logger.info("  Computing full TF-IDF similarity matrix...")
+    # This is fast: (test_size, train_size)
+    tfidf_sim_matrix = (test_sparse_matrix * tfidf.tfidf_matrix.T).toarray()
+
     # ----- 3. BATCH RETRIEVAL ----- #
     logger.info("[3/6] Performing batch retrieval (same-subset filtering)...")
     test_subsets = test_df["subset"].tolist()
     train_subsets = train_df["subset"].values
 
+    # We fetch top 25 from dense to allow robust RRF re-ranking
     all_retrievals = retriever.batch_retrieve(
-        test_embeddings, test_subsets, train_subsets, top_k=args.top_k
+        test_embeddings, test_subsets, train_subsets, top_k=25
     )
     logger.info(f"  Retrieval complete for {len(all_retrievals)} test rows.")
 
@@ -616,7 +634,7 @@ def main():
         # Get threshold for this subset
         threshold = SUBSET_THRESHOLDS.get(subset, 0.96)
 
-        # Routing decision
+        # Routing decision uses DENSE ONLY — do not use hybrid score here!
         if top1_sim >= threshold or args.retrieval_only:
             # ----- RETRIEVAL PATH -----
             prediction = str(top1_answer) if top1_answer else ""
@@ -624,10 +642,31 @@ def main():
             n_retrieved += 1
         elif need_generation:
             # ----- GENERATION PATH -----
-            # Build few-shot context from top-k retrievals
-            # Filter low-quality retrievals (< 0.70) and keep top 3
+            # Re-rank the top 25 dense candidates using Reciprocal Rank Fusion (RRF)
+            candidate_indices = [idx for idx, sim in retrievals]
+            
+            # Dense ranks are implicitly the order of candidate_indices
+            dense_ranks = {idx: rank for rank, idx in enumerate(candidate_indices)}
+            
+            # Get TF-IDF scores for these candidates and rank them
+            sparse_scores = tfidf_sim_matrix[i, candidate_indices]
+            sparse_order = np.argsort(-sparse_scores)
+            sparse_ranks = {candidate_indices[pos]: rank for rank, pos in enumerate(sparse_order)}
+            
+            # Combine via RRF
+            k_rrf = 60
+            hybrid_scores = {}
+            for idx in candidate_indices:
+                hybrid_scores[idx] = 1.0 / (k_rrf + dense_ranks[idx]) + 1.0 / (k_rrf + sparse_ranks[idx])
+                
+            hybrid_top_indices = sorted(candidate_indices, key=lambda idx: hybrid_scores[idx], reverse=True)
+
+            # Build few-shot context from hybrid top-k
+            # Filter low-quality dense retrievals (< 0.70) and keep top 3
             few_shot_examples = []
-            for idx, sim in retrievals:
+            for idx in hybrid_top_indices:
+                # Look up the dense sim to ensure semantic safety
+                sim = next(s for d_idx, s in retrievals if d_idx == idx)
                 if sim > 0.70 and len(few_shot_examples) < 3:
                     ex_q = train_df.iloc[idx][q_col]
                     ex_a = train_df.iloc[idx][a_col]
@@ -721,8 +760,10 @@ def main():
         n_gen = sum(1 for r in sub_routes if r["route"] == "generation")
         n_fb  = sum(1 for r in sub_routes if r["route"] == "fallback_to_retrieval")
         avg_sim = np.mean([r["top1_sim"] for r in sub_routes]) if sub_routes else 0
+        gen_ratio = (n_gen / n_sub * 100) if n_sub > 0 else 0.0
         logger.info(
-            f"    {subset:10s}: n={n_sub:4d} | ret={n_ret:4d} gen={n_gen:4d} fb={n_fb:3d} | avg_sim={avg_sim:.4f}"
+            f"    {subset:10s}: n={n_sub:4d} | ret={n_ret:4d} gen={n_gen:4d} fb={n_fb:3d} | "
+            f"Ratio={gen_ratio:.1f}% gen | avg_sim={avg_sim:.4f}"
         )
 
     # ----- WRITE SUBMISSION CSV ----- #
@@ -737,8 +778,12 @@ def main():
         else:
             clean_predictions.append(str(p))
 
+    # Generate timestamp for unique filenames
+    import datetime
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # Submission CSV (Zindi format)
-    submission_path = os.path.join(args.output_dir, "submission.csv")
+    submission_path = os.path.join(args.output_dir, f"submission_{ts}.csv")
     with open(submission_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerow(["ID", "TargetRLF1", "TargetR1F1", "TargetLLM"])
@@ -749,7 +794,7 @@ def main():
     logger.info(f"  Submission written: {submission_path}")
 
     # Debug predictions CSV
-    debug_path = os.path.join(args.output_dir, "predictions_debug.csv")
+    debug_path = os.path.join(args.output_dir, f"predictions_debug_{ts}.csv")
     debug_df = pd.DataFrame(routing_log)
     debug_df["prediction"] = clean_predictions
     debug_df["question"] = test_df[q_col_test].tolist()
@@ -757,7 +802,7 @@ def main():
     logger.info(f"  Debug predictions: {debug_path}")
 
     # Routing stats JSON
-    stats_path = os.path.join(args.output_dir, "routing_stats.json")
+    stats_path = os.path.join(args.output_dir, f"routing_stats_{ts}.json")
     summary = {
         "total": total,
         "n_retrieved": n_retrieved,
